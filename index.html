@@ -25,7 +25,8 @@
 // ==========================================
 const BAUD_RATE = 1152000; // ESP32側の Serial.begin() と一致させる
 const SAMPLES = 512;
-const PACKET_SIZE = 512 * 2 * 2; // 512サンプル * 2ch * 2byte = 2048
+const PACKET_SIZE = 512 * 2; // 1024バイト（モノラル）
+//const PACKET_SIZE = 512 * 2 * 2; // 2048バイト（2ch）
 const Y_MAX = 50000; // ★音量に合わせて調整してください
 
 let port;
@@ -101,7 +102,8 @@ function processAudioData(rawData) {
     let real = new Float32Array(SAMPLES);
     
     for (let j = 0; j < SAMPLES; j++) {
-        let sample = dataView.getInt16(j * 4, true); 
+        //let sample = dataView.getInt16(j * 4, true); // 2ch
+        let sample = dataView.getInt16(j * 2, true); // モノラル
         
         // ハニング窓を適用
         let multiplier = 0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1)));
