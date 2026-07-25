@@ -4,41 +4,58 @@
     <meta charset="UTF-8">
     <title>Dispenser Detector</title>
     <style>
+        /* 完全に白背景の中央配置スタイル */
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: #1e1e1e; 
-            color: #fff; 
-            margin: 20px; 
-            text-align: center; 
+            background-color: #ffffff; 
+            color: #333333; 
+            margin: 0; 
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
         }
-        canvas { 
-            background-color: #000; 
-            border: 1px solid #555; 
-            margin-top: 20px; 
-            border-radius: 10px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5); 
+        
+        /* 接続用UIのコンテナ */
+        #setup-ui {
+            position: absolute;
+            top: 40px;
+            text-align: center;
+            z-index: 10;
         }
+
         button { 
             font-size: 18px; 
-            padding: 10px 20px; 
+            padding: 12px 24px; 
             cursor: pointer; 
-            background-color: #007acc; 
+            background-color: #333; 
             color: white; 
             border: none; 
-            border-radius: 5px; 
+            border-radius: 8px; 
             transition: background-color 0.2s;
+            font-weight: bold;
         }
-        button:hover { background-color: #005f9e; }
-        #status { margin-top: 10px; color: #aaa; }
+        button:hover { background-color: #555; }
+        #status { margin-top: 10px; color: #888; font-size: 14px;}
+        
+        /* キャンバスは枠線を消して背景に溶け込ませる */
+        canvas { 
+            background-color: transparent; 
+        }
     </style>
 </head>
 <body>
 
-    <h2>Dispenser Detector</h2>
-    <button id="connectBtn">Connect to MCU</button>
-    <div id="status">Disconnected</div>
+    <!-- 接続完了後に丸ごと非表示にするエリア -->
+    <div id="setup-ui">
+        <button id="connectBtn">Connect to MCU</button>
+        <div id="status">Waiting for connection...</div>
+    </div>
     
-    <canvas id="displayCanvas" width="1000" height="500"></canvas>
+    <!-- メインの描画エリア -->
+    <canvas id="displayCanvas" width="800" height="800"></canvas>
 
 <script>
 // ==========================================
@@ -48,20 +65,19 @@ const BAUD_RATE = 1152000;
 const SAMPLES = 512;
 const PACKET_SIZE = 512 * 2 * 2; 
 
-// Detection Settings
-const SAMPLE_RATE = 80000; // Estimated from your previous 40kHz Nyquist limit
-const BIN_RES = SAMPLE_RATE / SAMPLES; // Approx 156.25 Hz per bin
-const BIN_15K = Math.round(17500 / BIN_RES); // Bin index for 15 kHz (~96)
-const BIN_20K = Math.round(19000 / BIN_RES); // Bin index for 20 kHz (~128)
+const SAMPLE_RATE = 80000; 
+const BIN_RES = SAMPLE_RATE / SAMPLES; 
+const BIN_15K = Math.round(15000 / BIN_RES); 
+const BIN_20K = Math.round(20000 / BIN_RES); 
 
-const THRESHOLD = 15000; // ★ Adjust based on actual volume
-const HOLD_TIME_MS = 2000; // How long to display the result (in milliseconds)
+const THRESHOLD = 15000; // ★ 感度調整用
+const HOLD_TIME_MS = 2000; // 表示を維持する時間 (ミリ秒)
 
 let port;
 let reader;
 let isConnected = false;
 
-// Display State
+// State Variables
 let displayState = "WAITING"; 
 let lastDetectTime = 0;
 
@@ -71,6 +87,14 @@ const ctx = canvas.getContext('2d');
 const width = canvas.width;
 const height = canvas.height;
 
+// 画像プリロード
+let imgEmpty = new Image(); imgEmpty.src = 'image_2.png';
+let imgSoap = new Image(); imgSoap.src = 'image_1.png';
+let imgAlcohol = new Image(); imgAlcohol.src = 'image_0.png';
+
+// 起動時から描画ループだけは開始しておく
+requestAnimationFrame(drawLoop);
+
 // ==========================================
 // Serial Communication
 // ==========================================
@@ -79,14 +103,15 @@ async function connect() {
         port = await navigator.serial.requestPort();
         await port.open({ baudRate: BAUD_RATE });
         
-        document.getElementById('status').innerText = "Connected (" + BAUD_RATE + " bps)";
         isConnected = true;
         
+        // 接続成功したらUIを隠す
+        document.getElementById('setup-ui').style.display = 'none';
+        
         readLoop();
-        drawLoop();
     } catch (e) {
         console.error(e);
-        document.getElementById('status').innerText = "Connection Error: " + e;
+        document.getElementById('status').innerText = "Error: " + e.message;
     }
 }
 
@@ -109,13 +134,11 @@ async function readLoop() {
                     if (buffer.length - i >= PACKET_SIZE + 2) {
                         let rawData = buffer.slice(i + 2, i + 2 + PACKET_SIZE);
                         processAudioData(rawData);
-                        
                         buffer = buffer.slice(i + 2 + PACKET_SIZE);
                         break; 
                     }
                 }
             }
-            
             if (buffer.length > PACKET_SIZE * 3) {
                 buffer = new Uint8Array(0);
             }
@@ -133,8 +156,6 @@ function processAudioData(rawData) {
     
     for (let j = 0; j < SAMPLES; j++) {
         let sample = dataView.getInt16(j * 4, true); 
-        
-        // Hanning Window
         let multiplier = 0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1)));
         real[j] = sample * multiplier;
     }
@@ -143,14 +164,10 @@ function processAudioData(rawData) {
     detectDispenser(fftResult);
 }
 
-// ==========================================
-// Frequency Peak Detection
-// ==========================================
 function detectDispenser(fft) {
     let maxVal = 0;
     let maxIndex = 0;
     
-    // Find the peak frequency bin
     for (let i = 0; i < fft.length; i++) {
         if (fft[i] > maxVal) {
             maxVal = fft[i];
@@ -158,41 +175,32 @@ function detectDispenser(fft) {
         }
     }
 
-    // Check if the amplitude is large enough
     if (maxVal > THRESHOLD) {
         let dist15k = Math.abs(maxIndex - BIN_15K);
         let dist20k = Math.abs(maxIndex - BIN_20K);
 
-        // Only classify if it's relatively close to 15kHz or 20kHz target
-        // (Tolerance: ~3kHz to prevent classifying background noise)
         if (dist15k < 20 || dist20k < 20) {
             if (dist15k < dist20k) {
                 displayState = "SOAP";
             } else {
                 displayState = "ALCOHOL";
             }
-            lastDetectTime = Date.now(); // Reset the display timer
+            lastDetectTime = Date.now(); 
         }
     }
 }
 
-// ==========================================
-// Simple FFT (Cooley-Tukey Radix-2)
-// ==========================================
+// FFT Algorithm (Cooley-Tukey Radix-2)
 function computeFFT(real) {
     let n = real.length;
     let imag = new Float32Array(n);
-    
     let j = 0;
     for (let i = 0; i < n - 1; i++) {
-        if (i < j) {
-            let tr = real[j]; real[j] = real[i]; real[i] = tr;
-        }
+        if (i < j) { let tr = real[j]; real[j] = real[i]; real[i] = tr; }
         let k = n >> 1;
         while (k <= j) { j -= k; k >>= 1; }
         j += k;
     }
-    
     for (let size = 2; size <= n; size *= 2) {
         let halfSize = size / 2;
         let tablestep = n / size;
@@ -203,7 +211,6 @@ function computeFFT(real) {
                 let s = Math.sin(angle);
                 let t_real = real[k + halfSize] * c - imag[k + halfSize] * s;
                 let t_imag = real[k + halfSize] * s + imag[k + halfSize] * c;
-                
                 real[k + halfSize] = real[k] - t_real;
                 imag[k + halfSize] = imag[k] - t_imag;
                 real[k] += t_real;
@@ -211,7 +218,6 @@ function computeFFT(real) {
             }
         }
     }
-    
     let magnitudes = new Float32Array(n / 2);
     for(let i = 0; i < n / 2; i++) {
         magnitudes[i] = Math.sqrt(real[i]*real[i] + imag[i]*imag[i]);
@@ -220,51 +226,104 @@ function computeFFT(real) {
 }
 
 // ==========================================
-// Rendering Loop (UI Updates)
+// Rendering / UI Graphics
 // ==========================================
 function drawLoop() {
-    if (!isConnected) return;
+    // 画面全体を白でクリア
+    ctx.clearRect(0, 0, width, height);
     
-    // Clear Background
-    ctx.fillStyle = '#121212';
-    ctx.fillRect(0, 0, width, height);
-    
-    // Revert to WAITING state if the hold time has passed
-    if (Date.now() - lastDetectTime > HOLD_TIME_MS) {
+    // 時間経過でWAITINGに戻す
+    if (displayState !== "WAITING" && Date.now() - lastDetectTime > HOLD_TIME_MS) {
         displayState = "WAITING";
     }
 
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    drawDispenserIllustration(displayState);
+    
+    requestAnimationFrame(drawLoop);
+}
 
-    // Draw UI based on the current state
-    if (displayState === "WAITING") {
-        ctx.fillStyle = '#555';
-        ctx.font = '30px sans-serif';
-        ctx.fillText("Listening for Dispenser Sounds...", width / 2, height / 2);
-    } 
-    else if (displayState === "SOAP") {
-        // Draw Soap UI (15kHz)
-        ctx.fillStyle = '#4CAF50';
-        ctx.font = '150px sans-serif';
-        ctx.fillText("🧼", width / 2, height / 2 - 40);
-        
-        ctx.fillStyle = '#A5D6A7';
-        ctx.font = 'bold 50px sans-serif';
-        ctx.fillText("Soap Dispenser", width / 2, height / 2 + 80);
-    } 
-    else if (displayState === "ALCOHOL") {
-        // Draw Alcohol UI (20kHz)
-        ctx.fillStyle = '#2196F3';
-        ctx.font = '150px sans-serif';
-        ctx.fillText("🧴", width / 2, height / 2 - 40);
-        
-        ctx.fillStyle = '#90CAF9';
-        ctx.font = 'bold 50px sans-serif';
-        ctx.fillText("Alcohol Sanitizer", width / 2, height / 2 + 80);
+// ディスペンサーを描画する関数
+function drawDispenserIllustration(state) {
+    const cx = width / 2;
+    const cy = height / 2 - 40;
+    
+    // 寸法設定
+    const bottleW = 200;
+    const bottleH = 260;
+    const bottleX = cx - bottleW / 2;
+    const bottleY = cy - bottleH / 2;
+    
+    const pumpW = 36;
+    const pumpH = 70;
+    const pumpX = cx - pumpW / 2;
+    const pumpY = bottleY - pumpH;
+    
+    // 状態による画像とテキストの定義
+    let liquidColor = "transparent";
+    let text = "";
+    let textColor = "#cccccc";
+    let img;
+
+    if (state === "SOAP") {
+        liquidColor = "#FF4081"; // 濃いピンク
+        text = "Soap";
+        textColor = "#E91E63";
+        img = imgSoap;
+    } else if (state === "ALCOHOL") {
+        liquidColor = "#00B0FF"; // 鮮やかな水色
+        text = "Alcohol";
+        textColor = "#0091EA";
+        img = imgAlcohol;
+    } else {
+        // WAITING
+        text = "Waiting...";
+        textColor = "#bbbbbb";
+        img = imgEmpty;
     }
 
-    requestAnimationFrame(drawLoop);
+    // 画像がロードされている場合のみ描画
+    if (img && img.complete && img.naturalWidth !== 0) {
+        const bottleFillY = bottleY + bottleH * 0.25; // 液体を描画する範囲の上端
+        const bottleFillH = bottleH * 0.75; // 液体を描画する範囲の高さ
+        const bottleFillX = bottleX;
+        const bottleFillW = bottleW;
+        
+        // 液体を描画（WAITING以外の時）
+        if (state !== "WAITING") {
+            ctx.fillStyle = liquidColor;
+            ctx.beginPath();
+            ctx.rect(bottleFillX, bottleFillY, bottleFillW, bottleFillH);
+            ctx.fill();
+        }
+
+        // 画像を描画
+        // 画像は白背景を含んでいるため、Canvas全体に白背景をクリアした後に描画
+        const imgRatio = img.naturalWidth / img.naturalHeight;
+        const imgH = bottleH + pumpH;
+        const imgW = imgH * imgRatio;
+        const imgX = cx - imgW / 2;
+        const imgY = bottleY - pumpH;
+        ctx.drawImage(img, imgX, imgY, imgW, imgH);
+    } else {
+        // 画像がロードされていない、またはロードエラーの場合
+        ctx.strokeStyle = "#333333";
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+        ctx.roundRect(bottleX, bottleY, bottleW, bottleH, 30);
+        ctx.stroke();
+    }
+
+    // テキストを描画
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = textColor;
+    
+    if (state === "WAITING") {
+        ctx.font = 'bold 36px sans-serif';
+    } else {
+        ctx.font = 'bold 72px sans-serif';
+    }
+    ctx.fillText(text, cx, bottleY + bottleH + 40);
 }
 
 document.getElementById('connectBtn').addEventListener('click', connect);
@@ -272,3 +331,4 @@ document.getElementById('connectBtn').addEventListener('click', connect);
 </script>
 </body>
 </html>
+```http://googleusercontent.com/image_generation_content/427
