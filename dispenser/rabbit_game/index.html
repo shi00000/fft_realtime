@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Rabbit Jump Game</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #222; 
+            color: #fff; 
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        #ui-container {
+            position: absolute;
+            z-index: 10;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+
+        button { 
+            font-size: 24px; 
+            padding: 15px 40px; 
+            cursor: pointer; 
+            background-color: #4CAF50; 
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            font-weight: bold;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        button:hover { background-color: #45a049; }
+        button:active { transform: scale(0.95); }
+        
+        #status { margin-top: 15px; color: #ddd; font-size: 16px; }
+        
+        canvas { 
+            background-color: #87CEEB; 
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- UI レイヤー -->
+    <div id="ui-container">
+        <h1 id="title">ウサギの障害物避けゲーム</h1>
+        <button id="connectBtn">マイクに接続</button>
+        <button id="startBtn" style="display: none;">スタート！</button>
+        <div id="status">マイコンと接続してゲームの準備をしてください</div>
+    </div>
+    
+    <!-- ゲーム画面 -->
+    <canvas id="gameCanvas" width="800" height="500"></canvas>
+
+<script>
+// ==========================================
+// 設定・定数
+// ==========================================
+// シリアル通信設定
+const BAUD_RATE = 1152000; 
+const SAMPLES = 512;
+const PACKET_SIZE = 512 * 2 * 2; 
+const SAMPLE_RATE = 80000; 
+const BIN_RES = SAMPLE_RATE / SAMPLES; 
+const THRESHOLD = 5000; // ★ ジャンプの感度調整用（環境に合わせて変更）
+
+// ゲーム設定
+const CANVAS_W = 800;
+const CANVAS_H = 500;
+const GROUND_Y = 400; // 地面の高さ
+const SCROLL_SPEED = 7; // 背景と障害物のスクロール速度
+const GAME_TIME = 30; // プレイ時間（秒）
+
+// 状態管理
+let port;
+let reader;
+let isConnected = false;
+let gameState = "INIT"; // INIT, READY, PLAYING, OVER
+let score = 0;
+let timeLeft = GAME_TIME;
+let gameTimerId = null;
+
+// ==========================================
+// 画像の読み込み
+// ==========================================
+const imgBg = new Image(); imgBg.src = "bg_natural_mori.jpg";
+const imgRabbit = new Image(); imgRabbit.src = "animal_usagi_nihon_nousagi.png";
+const imgLion = new Image(); imgLion.src = "animal_lion.png";
+const imgBush = new Image(); imgBush.src = "kusa_simple3.png";
+const imgCarrot = new Image(); imgCarrot.src = "ninjin_carrot.png";
+
+// ==========================================
+// ゲームオブジェクト
+// ==========================================
+let bgX = 0;
+
+let rabbit = {
+    x: 100,
+    y: GROUND_Y - 80,
+    width: 80,
+    height: 80,
+    vy: 0,
+    gravity: 1.2,
+    jumpStrength: -20,
+    isJumping: false
+};
+
+let entities = [];
+
+// ==========================================
+// Canvas セットアップ
+// ==========================================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+requestAnimationFrame(gameLoop);
+
+// ==========================================
+// UI 操作
+// ==========================================
+const connectBtn = document.getElementById('connectBtn');
+const startBtn = document.getElementById('startBtn');
+const uiContainer = document.getElementById('ui-container');
+const statusText = document.getElementById('status');
+const titleText = document.getElementById('title');
+
+connectBtn.addEventListener('click', async () => {
+    try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: BAUD_RATE });
+        isConnected = true;
+        
+        // 接続成功したらマイクUIを消してスタートボタンを表示
+        connectBtn.style.display = 'none';
+        startBtn.style.display = 'inline-block';
+        statusText.innerText = "高周波（15kHz〜20kHz）でジャンプします！";
+        gameState = "READY";
+        
+        readLoop();
+    } catch (e) {
+        console.error(e);
+        statusText.innerText = "エラー: " + e.message;
+    }
+});
+
+startBtn.addEventListener('click', () => {
+    // ゲーム初期化
+    uiContainer.style.display = 'none';
+    score = 0;
+    timeLeft = GAME_TIME;
+    entities = [];
+    rabbit.y = GROUND_Y - rabbit.height;
+    rabbit.vy = 0;
+    rabbit.isJumping = false;
+    gameState = "PLAYING";
+    
+    // タイマー開始
+    if (gameTimerId) clearInterval(gameTimerId);
+    gameTimerId = setInterval(() => {
+        if (gameState === "PLAYING") {
+            timeLeft--;
+            if (timeLeft <= 0) {
+                gameOver();
+            }
+        }
+    }, 1000);
+});
+
+function gameOver() {
+    gameState = "OVER";
+    clearInterval(gameTimerId);
+    
+    setTimeout(() => {
+        uiContainer.style.display = 'block';
+        titleText.innerText = "タイムアップ！";
+        startBtn.innerText = "もう一度遊ぶ";
+        statusText.innerText = `最終スコア: ${score} ポイント`;
+    }, 1000);
+}
+
+// ==========================================
+// Web Serial & 音声解析 (FFT)
+// ==========================================
+async function readLoop() {
+    reader = port.readable.getReader();
+    let buffer = new Uint8Array(0);
+
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            let newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+
+            for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xAA && buffer[i+1] === 0xBB) {
+                    if (buffer.length - i >= PACKET_SIZE + 2) {
+                        let rawData = buffer.slice(i + 2, i + 2 + PACKET_SIZE);
+                        processAudioData(rawData);
+                        buffer = buffer.slice(i + 2 + PACKET_SIZE);
+                        break; 
+                    }
+                }
+            }
+            if (buffer.length > PACKET_SIZE * 3) {
+                buffer = new Uint8Array(0);
+            }
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        reader.releaseLock();
+    }
+}
+
+function processAudioData(rawData) {
+    let dataView = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+    let real = new Float32Array(SAMPLES);
+    for (let j = 0; j < SAMPLES; j++) {
+        let sample = dataView.getInt16(j * 4, true); 
+        real[j] = sample * (0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1)))); // ハニング窓
+    }
+    let fftResult = computeFFT(real);
+    handleAudioInput(fftResult);
+}
+
+function handleAudioInput(fft) {
+    if (gameState !== "PLAYING") return;
+
+    let maxVal = 0;
+    let maxIndex = 0;
+    
+    // ピーク周波数の特定
+    for (let i = 0; i < fft.length; i++) {
+        if (fft[i] > maxVal) {
+            maxVal = fft[i];
+            maxIndex = i;
+        }
+    }
+
+    let peakFreq = maxIndex * BIN_RES;
+
+    // 振幅が閾値を超え、かつ 15,000Hz 〜 20,000Hz の間ならジャンプ
+    if (maxVal > THRESHOLD && peakFreq >= 15000 && peakFreq <= 20000) {
+        // 地面にいる時だけジャンプ可能
+        if (!rabbit.isJumping) {
+            rabbit.vy = rabbit.jumpStrength;
+            rabbit.isJumping = true;
+        }
+    }
+}
+
+// 簡易FFT
+function computeFFT(real) {
+    let n = real.length;
+    let imag = new Float32Array(n);
+    let j = 0;
+    for (let i = 0; i < n - 1; i++) {
+        if (i < j) { let tr = real[j]; real[j] = real[i]; real[i] = tr; }
+        let k = n >> 1;
+        while (k <= j) { j -= k; k >>= 1; }
+        j += k;
+    }
+    for (let size = 2; size <= n; size *= 2) {
+        let halfSize = size / 2;
+        let tablestep = n / size;
+        for (let i = 0; i < n; i += size) {
+            for (let k = i, m = 0; k < i + halfSize; k++, m += tablestep) {
+                let angle = -2 * Math.PI * m / n;
+                let c = Math.cos(angle); let s = Math.sin(angle);
+                let t_real = real[k + halfSize] * c - imag[k + halfSize] * s;
+                let t_imag = real[k + halfSize] * s + imag[k + halfSize] * c;
+                real[k + halfSize] = real[k] - t_real; imag[k + halfSize] = imag[k] - t_imag;
+                real[k] += t_real; imag[k] += t_imag;
+            }
+        }
+    }
+    let magnitudes = new Float32Array(n / 2);
+    for(let i = 0; i < n / 2; i++) {
+        magnitudes[i] = Math.sqrt(real[i]*real[i] + imag[i]*imag[i]);
+    }
+    return magnitudes;
+}
+
+// ==========================================
+// ゲームループ（更新と描画）
+// ==========================================
+function spawnEntity() {
+    let rand = Math.random();
+    let type, img, w, h, points, y;
+
+    if (rand < 0.4) {
+        // ニンジン（空中または地面）
+        type = "carrot"; img = imgCarrot; w = 60; h = 60; points = 1;
+        y = Math.random() < 0.5 ? GROUND_Y - h : GROUND_Y - h - 120; 
+    } else if (rand < 0.7) {
+        // しげみ（地面）
+        type = "bush"; img = imgBush; w = 80; h = 60; points = -1;
+        y = GROUND_Y - h + 10; 
+    } else {
+        // ライオン（地面）
+        type = "lion"; img = imgLion; w = 110; h = 110; points = -3;
+        y = GROUND_Y - h; 
+    }
+
+    entities.push({
+        x: CANVAS_W, y: y, width: w, height: h,
+        img: img, type: type, points: points, hit: false
+    });
+}
+
+function update() {
+    if (gameState !== "PLAYING") return;
+
+    // 背景のスクロール
+    bgX -= SCROLL_SPEED / 2;
+    if (bgX <= -CANVAS_W) bgX = 0;
+
+    // ウサギの物理演算（ジャンプと重力）
+    rabbit.y += rabbit.vy;
+    rabbit.vy += rabbit.gravity;
+
+    // 着地判定
+    if (rabbit.y >= GROUND_Y - rabbit.height) {
+        rabbit.y = GROUND_Y - rabbit.height;
+        rabbit.vy = 0;
+        rabbit.isJumping = false;
+    }
+
+    // 障害物/アイテムのスポーン (約1.5%の確率で毎フレーム生成)
+    if (Math.random() < 0.015 && entities.length < 5) {
+        // 前のオブジェクトとの間隔をあける
+        let lastObj = entities[entities.length - 1];
+        if (!lastObj || CANVAS_W - lastObj.x > 200) {
+            spawnEntity();
+        }
+    }
+
+    // 障害物の移動と衝突判定
+    for (let i = entities.length - 1; i >= 0; i--) {
+        let e = entities[i];
+        e.x -= SCROLL_SPEED;
+
+        // 衝突判定 (AABB) 衝突領域を少し小さめ（甘め）に設定
+        let hitboxPad = 15;
+        if (!e.hit &&
+            rabbit.x + hitboxPad < e.x + e.width - hitboxPad &&
+            rabbit.x + rabbit.width - hitboxPad > e.x + hitboxPad &&
+            rabbit.y + hitboxPad < e.y + e.height - hitboxPad &&
+            rabbit.y + rabbit.height - hitboxPad > e.y + hitboxPad) 
+        {
+            e.hit = true;
+            score += e.points;
+            
+            // スコアがマイナスにならないようにする（任意）
+            // if (score < 0) score = 0; 
+
+            // ニンジンは取ったら消える
+            if (e.type === "carrot") {
+                entities.splice(i, 1);
+                continue;
+            }
+        }
+
+        // 画面外に出たら削除
+        if (e.x + e.width < 0) {
+            entities.splice(i, 1);
+        }
+    }
+}
+
+function draw() {
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // 背景の描画（2枚を並べてループさせる）
+    if (imgBg.complete) {
+        ctx.drawImage(imgBg, bgX, 0, CANVAS_W, CANVAS_H);
+        ctx.drawImage(imgBg, bgX + CANVAS_W, 0, CANVAS_W, CANVAS_H);
+    }
+
+    if (gameState === "PLAYING" || gameState === "OVER") {
+        // オブジェクトの描画
+        for (let e of entities) {
+            if (e.hit && e.type !== "carrot") {
+                // 敵に当たった後は半透明で表示
+                ctx.globalAlpha = 0.4; 
+            }
+            if (e.img.complete) {
+                ctx.drawImage(e.img, e.x, e.y, e.width, e.height);
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        // ウサギの描画
+        if (imgRabbit.complete) {
+            ctx.drawImage(imgRabbit, rabbit.x, rabbit.y, rabbit.width, rabbit.height);
+        }
+
+        // スコアとタイマーの描画
+        ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+        ctx.fillRect(10, 10, 150, 80);
+        ctx.fillStyle = "#333";
+        ctx.font = "bold 24px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(`SCORE: ${score}`, 20, 45);
+        
+        ctx.fillStyle = timeLeft <= 5 ? "red" : "#333";
+        ctx.fillText(`TIME: ${timeLeft}`, 20, 75);
+        
+        // 終了画面のテキスト
+        if (gameState === "OVER") {
+            ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+            ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+            ctx.fillStyle = "white";
+            ctx.font = "bold 60px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("FINISH!", CANVAS_W / 2, CANVAS_H / 2);
+        }
+    }
+}
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+</script>
+</body>
+</html>
