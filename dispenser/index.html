@@ -67,10 +67,10 @@ const PACKET_SIZE = 512 * 2 * 2;
 
 const SAMPLE_RATE = 80000; 
 const BIN_RES = SAMPLE_RATE / SAMPLES; 
-const BIN_15K = Math.round(15000 / BIN_RES); 
-const BIN_20K = Math.round(20000 / BIN_RES); 
+const BIN_15K = Math.round(18000 / BIN_RES); 
+const BIN_20K = Math.round(19000 / BIN_RES); 
 
-const THRESHOLD = 8000; // ★ 感度調整用
+const THRESHOLD = 5000; // ★ 感度調整用
 const HOLD_TIME_MS = 2000; // 表示を維持する時間 (ミリ秒)
 
 let port;
