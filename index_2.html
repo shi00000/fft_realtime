@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Web Serial Real-time FFT (Pure Data)</title>
+    <style>
+        body { font-family: sans-serif; background-color: #1e1e1e; color: #fff; margin: 20px; text-align: center; }
+        canvas { background-color: #000; border: 1px solid #555; margin-top: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+        button { font-size: 18px; padding: 10px 20px; cursor: pointer; background-color: #007acc; color: white; border: none; border-radius: 5px; }
+        button:hover { background-color: #005f9e; }
+        #status { margin-top: 10px; color: #aaa; }
+    </style>
+</head>
+<body>
+
+    <h2>High-Speed Real-time FFT (Pure Data)</h2>
+    <button id="connectBtn">マイコンに接続</button>
+    <div id="status">未接続</div>
+    
+    <canvas id="fftCanvas" width="1000" height="500"></canvas>
+
+<script>
+// ==========================================
+// 設定
+// ==========================================
+const BAUD_RATE = 1152000; // ESP32側の Serial.begin() と一致させる
+const SAMPLES = 512;
+const PACKET_SIZE = 512 * 2 * 2; // 512サンプル * 2ch * 2byte = 2048
+const Y_MAX = 50000; // ★音量に合わせて調整してください
+
+let port;
+let reader;
+let isConnected = false;
+
+// 描画関連
+const canvas = document.getElementById('fftCanvas');
+const ctx = canvas.getContext('2d');
+const width = canvas.width;
+const height = canvas.height;
+
+// ==========================================
+// シリアル通信とデータ処理
+// ==========================================
+async function connect() {
+    try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: BAUD_RATE });
+        
+        document.getElementById('status').innerText = "接続中 (" + BAUD_RATE + " bps)";
+        isConnected = true;
+        
+        readLoop();
+        drawLoop();
+    } catch (e) {
+        console.error(e);
+        document.getElementById('status').innerText = "接続エラー: " + e;
+    }
+}
+
+async function readLoop() {
+    reader = port.readable.getReader();
+    let buffer = new Uint8Array(0);
+
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            let newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+
+            for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xAA && buffer[i+1] === 0xBB) {
+                    if (buffer.length - i >= PACKET_SIZE + 2) {
+                        let rawData = buffer.slice(i + 2, i + 2 + PACKET_SIZE);
+                        processAudioData(rawData);
+                        
+                        buffer = buffer.slice(i + 2 + PACKET_SIZE);
+                        break; 
+                    }
+                }
+            }
+            
+            if (buffer.length > PACKET_SIZE * 3) {
+                buffer = new Uint8Array(0);
+            }
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        reader.releaseLock();
+    }
+}
+
+let latestFFT = new Float32Array(SAMPLES / 2);
+
+function processAudioData(rawData) {
+    let dataView = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+    let real = new Float32Array(SAMPLES);
+    
+    for (let j = 0; j < SAMPLES; j++) {
+        let sample = dataView.getInt16(j * 4, true); 
+        
+        // ハニング窓を適用
+        let multiplier = 0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1)));
+        real[j] = sample * multiplier;
+    }
+    
+    latestFFT = computeFFT(real);
+}
+
+// ==========================================
+// 簡易FFTアルゴリズム (Cooley-Tukey Radix-2)
+// ==========================================
+function computeFFT(real) {
+    let n = real.length;
+    let imag = new Float32Array(n);
+    
+    let j = 0;
+    for (let i = 0; i < n - 1; i++) {
+        if (i < j) {
+            let tr = real[j]; real[j] = real[i]; real[i] = tr;
+        }
+        let k = n >> 1;
+        while (k <= j) { j -= k; k >>= 1; }
+        j += k;
+    }
+    
+    for (let size = 2; size <= n; size *= 2) {
+        let halfSize = size / 2;
+        let tablestep = n / size;
+        for (let i = 0; i < n; i += size) {
+            for (let k = i, m = 0; k < i + halfSize; k++, m += tablestep) {
+                let angle = -2 * Math.PI * m / n;
+                let c = Math.cos(angle);
+                let s = Math.sin(angle);
+                let t_real = real[k + halfSize] * c - imag[k + halfSize] * s;
+                let t_imag = real[k + halfSize] * s + imag[k + halfSize] * c;
+                
+                real[k + halfSize] = real[k] - t_real;
+                imag[k + halfSize] = imag[k] - t_imag;
+                real[k] += t_real;
+                imag[k] += t_imag;
+            }
+        }
+    }
+    
+    let magnitudes = new Float32Array(n / 2);
+    for(let i = 0; i < n / 2; i++) {
+        magnitudes[i] = Math.sqrt(real[i]*real[i] + imag[i]*imag[i]);
+    }
+    return magnitudes;
+}
+
+// ==========================================
+// 描画ループ (requestAnimationFrameでモニター同期)
+// ==========================================
+function drawLoop() {
+    if (!isConnected) return;
+    
+    // 背景をクリア (黒)
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+    
+    // グリッド線とラベルを描画
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for(let i = 1; i < 8; i++) { // 10k, 20k, 30kHz lines
+        let x = (width / 8) * i;
+        ctx.moveTo(x, 0); ctx.lineTo(x, height);
+    }
+    ctx.stroke();
+    
+    ctx.fillStyle = '#888';
+    ctx.font = '14px sans-serif';
+    ctx.fillText("10 kHz", width*0.25 - 20, height - 10);
+    ctx.fillText("20 kHz", width*0.5  - 20, height - 10);
+    ctx.fillText("30 kHz", width*0.75 - 20, height - 10);
+
+    let binWidth = width / (SAMPLES / 2);
+
+    // リアルタイム波形 (水色の線) のみを描画
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < SAMPLES / 2; i++) {
+        let x = i * binWidth;
+        let y = height - (latestFFT[i] / Y_MAX) * height;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    requestAnimationFrame(drawLoop);
+}
+
+document.getElementById('connectBtn').addEventListener('click', connect);
+
+</script>
+</body>
+</html>
