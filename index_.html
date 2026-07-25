@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dispenser Detector</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #1e1e1e; 
+            color: #fff; 
+            margin: 20px; 
+            text-align: center; 
+        }
+        canvas { 
+            background-color: #000; 
+            border: 1px solid #555; 
+            margin-top: 20px; 
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5); 
+        }
+        button { 
+            font-size: 18px; 
+            padding: 10px 20px; 
+            cursor: pointer; 
+            background-color: #007acc; 
+            color: white; 
+            border: none; 
+            border-radius: 5px; 
+            transition: background-color 0.2s;
+        }
+        button:hover { background-color: #005f9e; }
+        #status { margin-top: 10px; color: #aaa; }
+    </style>
+</head>
+<body>
+
+    <h2>Dispenser Detector</h2>
+    <button id="connectBtn">Connect to MCU</button>
+    <div id="status">Disconnected</div>
+    
+    <canvas id="displayCanvas" width="1000" height="500"></canvas>
+
+<script>
+// ==========================================
+// Settings
+// ==========================================
+const BAUD_RATE = 1152000; 
+const SAMPLES = 512;
+const PACKET_SIZE = 512 * 2 * 2; 
+
+// Detection Settings
+const SAMPLE_RATE = 80000; // Estimated from your previous 40kHz Nyquist limit
+const BIN_RES = SAMPLE_RATE / SAMPLES; // Approx 156.25 Hz per bin
+const BIN_15K = Math.round(15000 / BIN_RES); // Bin index for 15 kHz (~96)
+const BIN_20K = Math.round(20000 / BIN_RES); // Bin index for 20 kHz (~128)
+
+const THRESHOLD = 15000; // ★ Adjust based on actual volume
+const HOLD_TIME_MS = 2000; // How long to display the result (in milliseconds)
+
+let port;
+let reader;
+let isConnected = false;
+
+// Display State
+let displayState = "WAITING"; 
+let lastDetectTime = 0;
+
+// Canvas Setup
+const canvas = document.getElementById('displayCanvas');
+const ctx = canvas.getContext('2d');
+const width = canvas.width;
+const height = canvas.height;
+
+// ==========================================
+// Serial Communication
+// ==========================================
+async function connect() {
+    try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: BAUD_RATE });
+        
+        document.getElementById('status').innerText = "Connected (" + BAUD_RATE + " bps)";
+        isConnected = true;
+        
+        readLoop();
+        drawLoop();
+    } catch (e) {
+        console.error(e);
+        document.getElementById('status').innerText = "Connection Error: " + e;
+    }
+}
+
+async function readLoop() {
+    reader = port.readable.getReader();
+    let buffer = new Uint8Array(0);
+
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            let newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+
+            for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xAA && buffer[i+1] === 0xBB) {
+                    if (buffer.length - i >= PACKET_SIZE + 2) {
+                        let rawData = buffer.slice(i + 2, i + 2 + PACKET_SIZE);
+                        processAudioData(rawData);
+                        
+                        buffer = buffer.slice(i + 2 + PACKET_SIZE);
+                        break; 
+                    }
+                }
+            }
+            
+            if (buffer.length > PACKET_SIZE * 3) {
+                buffer = new Uint8Array(0);
+            }
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        reader.releaseLock();
+    }
+}
+
+function processAudioData(rawData) {
+    let dataView = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+    let real = new Float32Array(SAMPLES);
+    
+    for (let j = 0; j < SAMPLES; j++) {
+        let sample = dataView.getInt16(j * 4, true); 
+        
+        // Hanning Window
+        let multiplier = 0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1)));
+        real[j] = sample * multiplier;
+    }
+    
+    let fftResult = computeFFT(real);
+    detectDispenser(fftResult);
+}
+
+// ==========================================
+// Frequency Peak Detection
+// ==========================================
+function detectDispenser(fft) {
+    let maxVal = 0;
+    let maxIndex = 0;
+    
+    // Find the peak frequency bin
+    for (let i = 0; i < fft.length; i++) {
+        if (fft[i] > maxVal) {
+            maxVal = fft[i];
+            maxIndex = i;
+        }
+    }
+
+    // Check if the amplitude is large enough
+    if (maxVal > THRESHOLD) {
+        let dist15k = Math.abs(maxIndex - BIN_15K);
+        let dist20k = Math.abs(maxIndex - BIN_20K);
+
+        // Only classify if it's relatively close to 15kHz or 20kHz target
+        // (Tolerance: ~3kHz to prevent classifying background noise)
+        if (dist15k < 20 || dist20k < 20) {
+            if (dist15k < dist20k) {
+                displayState = "SOAP";
+            } else {
+                displayState = "ALCOHOL";
+            }
+            lastDetectTime = Date.now(); // Reset the display timer
+        }
+    }
+}
+
+// ==========================================
+// Simple FFT (Cooley-Tukey Radix-2)
+// ==========================================
+function computeFFT(real) {
+    let n = real.length;
+    let imag = new Float32Array(n);
+    
+    let j = 0;
+    for (let i = 0; i < n - 1; i++) {
+        if (i < j) {
+            let tr = real[j]; real[j] = real[i]; real[i] = tr;
+        }
+        let k = n >> 1;
+        while (k <= j) { j -= k; k >>= 1; }
+        j += k;
+    }
+    
+    for (let size = 2; size <= n; size *= 2) {
+        let halfSize = size / 2;
+        let tablestep = n / size;
+        for (let i = 0; i < n; i += size) {
+            for (let k = i, m = 0; k < i + halfSize; k++, m += tablestep) {
+                let angle = -2 * Math.PI * m / n;
+                let c = Math.cos(angle);
+                let s = Math.sin(angle);
+                let t_real = real[k + halfSize] * c - imag[k + halfSize] * s;
+                let t_imag = real[k + halfSize] * s + imag[k + halfSize] * c;
+                
+                real[k + halfSize] = real[k] - t_real;
+                imag[k + halfSize] = imag[k] - t_imag;
+                real[k] += t_real;
+                imag[k] += t_imag;
+            }
+        }
+    }
+    
+    let magnitudes = new Float32Array(n / 2);
+    for(let i = 0; i < n / 2; i++) {
+        magnitudes[i] = Math.sqrt(real[i]*real[i] + imag[i]*imag[i]);
+    }
+    return magnitudes;
+}
+
+// ==========================================
+// Rendering Loop (UI Updates)
+// ==========================================
+function drawLoop() {
+    if (!isConnected) return;
+    
+    // Clear Background
+    ctx.fillStyle = '#121212';
+    ctx.fillRect(0, 0, width, height);
+    
+    // Revert to WAITING state if the hold time has passed
+    if (Date.now() - lastDetectTime > HOLD_TIME_MS) {
+        displayState = "WAITING";
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Draw UI based on the current state
+    if (displayState === "WAITING") {
+        ctx.fillStyle = '#555';
+        ctx.font = '30px sans-serif';
+        ctx.fillText("Listening for Dispenser Sounds...", width / 2, height / 2);
+    } 
+    else if (displayState === "SOAP") {
+        // Draw Soap UI (15kHz)
+        ctx.fillStyle = '#4CAF50';
+        ctx.font = '150px sans-serif';
+        ctx.fillText("🧼", width / 2, height / 2 - 40);
+        
+        ctx.fillStyle = '#A5D6A7';
+        ctx.font = 'bold 50px sans-serif';
+        ctx.fillText("Soap Dispenser", width / 2, height / 2 + 80);
+    } 
+    else if (displayState === "ALCOHOL") {
+        // Draw Alcohol UI (20kHz)
+        ctx.fillStyle = '#2196F3';
+        ctx.font = '150px sans-serif';
+        ctx.fillText("🧴", width / 2, height / 2 - 40);
+        
+        ctx.fillStyle = '#90CAF9';
+        ctx.font = 'bold 50px sans-serif';
+        ctx.fillText("Alcohol Sanitizer", width / 2, height / 2 + 80);
+    }
+
+    requestAnimationFrame(drawLoop);
+}
+
+document.getElementById('connectBtn').addEventListener('click', connect);
+
+</script>
+</body>
+</html>

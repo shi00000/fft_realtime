@@ -1,92 +1,59 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Dispenser Detector</title>
+    <title>Web Serial Real-time FFT (Pure Data)</title>
     <style>
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            background-color: #1e1e1e; 
-            color: #fff; 
-            margin: 20px; 
-            text-align: center; 
-        }
-        canvas { 
-            background-color: #000; 
-            border: 1px solid #555; 
-            margin-top: 20px; 
-            border-radius: 10px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5); 
-        }
-        button { 
-            font-size: 18px; 
-            padding: 10px 20px; 
-            cursor: pointer; 
-            background-color: #007acc; 
-            color: white; 
-            border: none; 
-            border-radius: 5px; 
-            transition: background-color 0.2s;
-        }
+        body { font-family: sans-serif; background-color: #1e1e1e; color: #fff; margin: 20px; text-align: center; }
+        canvas { background-color: #000; border: 1px solid #555; margin-top: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+        button { font-size: 18px; padding: 10px 20px; cursor: pointer; background-color: #007acc; color: white; border: none; border-radius: 5px; }
         button:hover { background-color: #005f9e; }
         #status { margin-top: 10px; color: #aaa; }
     </style>
 </head>
 <body>
 
-    <h2>Dispenser Detector</h2>
-    <button id="connectBtn">Connect to MCU</button>
-    <div id="status">Disconnected</div>
+    <h2>High-Speed Real-time FFT (Pure Data)</h2>
+    <button id="connectBtn">マイコンに接続</button>
+    <div id="status">未接続</div>
     
-    <canvas id="displayCanvas" width="1000" height="500"></canvas>
+    <canvas id="fftCanvas" width="1000" height="500"></canvas>
 
 <script>
 // ==========================================
-// Settings
+// 設定
 // ==========================================
-const BAUD_RATE = 1152000; 
+const BAUD_RATE = 1152000; // ESP32側の Serial.begin() と一致させる
 const SAMPLES = 512;
-const PACKET_SIZE = 512 * 2 * 2; 
-
-// Detection Settings
-const SAMPLE_RATE = 80000; // Estimated from your previous 40kHz Nyquist limit
-const BIN_RES = SAMPLE_RATE / SAMPLES; // Approx 156.25 Hz per bin
-const BIN_15K = Math.round(15000 / BIN_RES); // Bin index for 15 kHz (~96)
-const BIN_20K = Math.round(20000 / BIN_RES); // Bin index for 20 kHz (~128)
-
-const THRESHOLD = 15000; // ★ Adjust based on actual volume
-const HOLD_TIME_MS = 2000; // How long to display the result (in milliseconds)
+const PACKET_SIZE = 512 * 2 * 2; // 512サンプル * 2ch * 2byte = 2048
+const Y_MAX = 50000; // ★音量に合わせて調整してください
 
 let port;
 let reader;
 let isConnected = false;
 
-// Display State
-let displayState = "WAITING"; 
-let lastDetectTime = 0;
-
-// Canvas Setup
-const canvas = document.getElementById('displayCanvas');
+// 描画関連
+const canvas = document.getElementById('fftCanvas');
 const ctx = canvas.getContext('2d');
 const width = canvas.width;
 const height = canvas.height;
 
 // ==========================================
-// Serial Communication
+// シリアル通信とデータ処理
 // ==========================================
 async function connect() {
     try {
         port = await navigator.serial.requestPort();
         await port.open({ baudRate: BAUD_RATE });
         
-        document.getElementById('status').innerText = "Connected (" + BAUD_RATE + " bps)";
+        document.getElementById('status').innerText = "接続中 (" + BAUD_RATE + " bps)";
         isConnected = true;
         
         readLoop();
         drawLoop();
     } catch (e) {
         console.error(e);
-        document.getElementById('status').innerText = "Connection Error: " + e;
+        document.getElementById('status').innerText = "接続エラー: " + e;
     }
 }
 
@@ -127,6 +94,8 @@ async function readLoop() {
     }
 }
 
+let latestFFT = new Float32Array(SAMPLES / 2);
+
 function processAudioData(rawData) {
     let dataView = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
     let real = new Float32Array(SAMPLES);
@@ -134,50 +103,16 @@ function processAudioData(rawData) {
     for (let j = 0; j < SAMPLES; j++) {
         let sample = dataView.getInt16(j * 4, true); 
         
-        // Hanning Window
+        // ハニング窓を適用
         let multiplier = 0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1)));
         real[j] = sample * multiplier;
     }
     
-    let fftResult = computeFFT(real);
-    detectDispenser(fftResult);
+    latestFFT = computeFFT(real);
 }
 
 // ==========================================
-// Frequency Peak Detection
-// ==========================================
-function detectDispenser(fft) {
-    let maxVal = 0;
-    let maxIndex = 0;
-    
-    // Find the peak frequency bin
-    for (let i = 0; i < fft.length; i++) {
-        if (fft[i] > maxVal) {
-            maxVal = fft[i];
-            maxIndex = i;
-        }
-    }
-
-    // Check if the amplitude is large enough
-    if (maxVal > THRESHOLD) {
-        let dist15k = Math.abs(maxIndex - BIN_15K);
-        let dist20k = Math.abs(maxIndex - BIN_20K);
-
-        // Only classify if it's relatively close to 15kHz or 20kHz target
-        // (Tolerance: ~3kHz to prevent classifying background noise)
-        if (dist15k < 20 || dist20k < 20) {
-            if (dist15k < dist20k) {
-                displayState = "SOAP";
-            } else {
-                displayState = "ALCOHOL";
-            }
-            lastDetectTime = Date.now(); // Reset the display timer
-        }
-    }
-}
-
-// ==========================================
-// Simple FFT (Cooley-Tukey Radix-2)
+// 簡易FFTアルゴリズム (Cooley-Tukey Radix-2)
 // ==========================================
 function computeFFT(real) {
     let n = real.length;
@@ -220,49 +155,44 @@ function computeFFT(real) {
 }
 
 // ==========================================
-// Rendering Loop (UI Updates)
+// 描画ループ (requestAnimationFrameでモニター同期)
 // ==========================================
 function drawLoop() {
     if (!isConnected) return;
     
-    // Clear Background
-    ctx.fillStyle = '#121212';
+    // 背景をクリア (黒)
+    ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
     
-    // Revert to WAITING state if the hold time has passed
-    if (Date.now() - lastDetectTime > HOLD_TIME_MS) {
-        displayState = "WAITING";
+    // グリッド線とラベルを描画
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for(let i = 1; i < 8; i++) { // 10k, 20k, 30kHz lines
+        let x = (width / 8) * i;
+        ctx.moveTo(x, 0); ctx.lineTo(x, height);
     }
+    ctx.stroke();
+    
+    ctx.fillStyle = '#888';
+    ctx.font = '14px sans-serif';
+    ctx.fillText("10 kHz", width*0.25 - 20, height - 10);
+    ctx.fillText("20 kHz", width*0.5  - 20, height - 10);
+    ctx.fillText("30 kHz", width*0.75 - 20, height - 10);
 
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    let binWidth = width / (SAMPLES / 2);
 
-    // Draw UI based on the current state
-    if (displayState === "WAITING") {
-        ctx.fillStyle = '#555';
-        ctx.font = '30px sans-serif';
-        ctx.fillText("Listening for Dispenser Sounds...", width / 2, height / 2);
-    } 
-    else if (displayState === "SOAP") {
-        // Draw Soap UI (15kHz)
-        ctx.fillStyle = '#4CAF50';
-        ctx.font = '150px sans-serif';
-        ctx.fillText("🧼", width / 2, height / 2 - 40);
-        
-        ctx.fillStyle = '#A5D6A7';
-        ctx.font = 'bold 50px sans-serif';
-        ctx.fillText("Soap Dispenser", width / 2, height / 2 + 80);
-    } 
-    else if (displayState === "ALCOHOL") {
-        // Draw Alcohol UI (20kHz)
-        ctx.fillStyle = '#2196F3';
-        ctx.font = '150px sans-serif';
-        ctx.fillText("🧴", width / 2, height / 2 - 40);
-        
-        ctx.fillStyle = '#90CAF9';
-        ctx.font = 'bold 50px sans-serif';
-        ctx.fillText("Alcohol Sanitizer", width / 2, height / 2 + 80);
+    // リアルタイム波形 (水色の線) のみを描画
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < SAMPLES / 2; i++) {
+        let x = i * binWidth;
+        let y = height - (latestFFT[i] / Y_MAX) * height;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
     }
+    ctx.stroke();
 
     requestAnimationFrame(drawLoop);
 }
