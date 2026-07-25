@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>キッズ動画リモコン</title>
+    <style>
+        /* 全画面真っ黒の背景 */
+        body { 
+            background-color: #000000; 
+            margin: 0; 
+            padding: 0;
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        /* 接続用UI */
+        #setup-ui {
+            position: absolute;
+            z-index: 10;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 15px;
+        }
+
+        button { 
+            font-size: 24px; 
+            padding: 15px 40px; 
+            cursor: pointer; 
+            background-color: #007acc; 
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        button:hover { background-color: #005f9e; }
+        
+        #status { margin-top: 15px; color: #fff; font-size: 16px; }
+        
+        /* 動画プレイヤー (初期状態は非表示) */
+        #videoPlayer {
+            width: 100%;
+            height: 100%;
+            object-fit: contain; /* 画面に収まるように表示 */
+            display: none; 
+        }
+    </style>
+</head>
+<body>
+
+    <div id="setup-ui">
+        <button id="connectBtn">マイクに接続</button>
+        <div id="status">リモコン（マイコン）を接続してください</div>
+    </div>
+    
+    <video id="videoPlayer" playsinline></video>
+
+<script>
+// ==========================================
+// 設定・定数
+// ==========================================
+const BAUD_RATE = 1152000; 
+const SAMPLES = 512;
+const PACKET_SIZE = 512 * 2 * 2; 
+
+const SAMPLE_RATE = 80000; 
+const BIN_RES = SAMPLE_RATE / SAMPLES; 
+
+// ターゲット周波数
+const FREQ_BEAR = 17500;
+const FREQ_OFF = 20000;
+const FREQ_BUNNY = 22000;
+
+const THRESHOLD = 2000; // ★ 反応感度（環境に合わせて調整してください）
+const TOLERANCE = 1000;  // ターゲット周波数からの許容誤差(Hz)
+
+let port;
+let reader;
+let isConnected = false;
+
+// 状態管理 ("OFF", "BEAR", "BUNNY")
+let currentVideoState = "OFF"; 
+
+// HTML要素
+const videoPlayer = document.getElementById('videoPlayer');
+const setupUI = document.getElementById('setup-ui');
+
+// ==========================================
+// シリアル通信・セットアップ
+// ==========================================
+document.getElementById('connectBtn').addEventListener('click', async () => {
+    try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: BAUD_RATE });
+        isConnected = true;
+        
+        // ブラウザの仕様上、ユーザー操作時に動画を一度ロードしておくと再生がスムーズになります
+        videoPlayer.src = "";
+        videoPlayer.load();
+
+        // 接続成功したらUIを隠す（真っ黒な画面になる）
+        setupUI.style.display = 'none';
+        
+        readLoop();
+    } catch (e) {
+        console.error(e);
+        document.getElementById('status').innerText = "エラー: " + e.message;
+    }
+});
+
+async function readLoop() {
+    reader = port.readable.getReader();
+    let buffer = new Uint8Array(0);
+
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            let newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+
+            for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xAA && buffer[i+1] === 0xBB) {
+                    if (buffer.length - i >= PACKET_SIZE + 2) {
+                        let rawData = buffer.slice(i + 2, i + 2 + PACKET_SIZE);
+                        processAudioData(rawData);
+                        buffer = buffer.slice(i + 2 + PACKET_SIZE);
+                        break; 
+                    }
+                }
+            }
+            if (buffer.length > PACKET_SIZE * 3) {
+                buffer = new Uint8Array(0);
+            }
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        reader.releaseLock();
+    }
+}
+
+// ==========================================
+// 音声処理・周波数判定
+// ==========================================
+function processAudioData(rawData) {
+    let dataView = new DataView(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+    let real = new Float32Array(SAMPLES);
+    
+    for (let j = 0; j < SAMPLES; j++) {
+        let sample = dataView.getInt16(j * 4, true); 
+        let multiplier = 0.5 * (1 - Math.cos(2 * Math.PI * j / (SAMPLES - 1))); // ハニング窓
+        real[j] = sample * multiplier;
+    }
+    
+    let fftResult = computeFFT(real);
+    detectFrequency(fftResult);
+}
+
+function detectFrequency(fft) {
+    let maxVal = 0;
+    let maxIndex = 0;
+    
+    // ピークの特定
+    for (let i = 0; i < fft.length; i++) {
+        if (fft[i] > maxVal) {
+            maxVal = fft[i];
+            maxIndex = i;
+        }
+    }
+
+    // 振幅が一定以上の場合のみ判定
+    if (maxVal > THRESHOLD) {
+        let peakFreq = maxIndex * BIN_RES;
+        
+        // 各ターゲット周波数との距離（差）を計算
+        let distBear = Math.abs(peakFreq - FREQ_BEAR);
+        let distOff = Math.abs(peakFreq - FREQ_OFF);
+        let distBunny = Math.abs(peakFreq - FREQ_BUNNY);
+
+        // 一番近い周波数を見つける
+        let minDist = Math.min(distBear, distOff, distBunny);
+
+        // 許容誤差範囲内であれば動画を切り替え
+        if (minDist <= TOLERANCE) {
+            if (minDist === distBear) {
+                switchVideo("BEAR");
+            } else if (minDist === distOff) {
+                switchVideo("OFF");
+            } else if (minDist === distBunny) {
+                switchVideo("BUNNY");
+            }
+        }
+    }
+}
+
+// ==========================================
+// 動画切り替え処理
+// ==========================================
+function switchVideo(targetState) {
+    // すでに同じ状態なら何もしない（何度も最初から再生されるのを防ぐ）
+    if (currentVideoState === targetState) return;
+    
+    currentVideoState = targetState;
+
+    if (targetState === "OFF") {
+        videoPlayer.pause();
+        videoPlayer.style.display = 'none'; // 非表示にして黒画面に
+    } else if (targetState === "BEAR") {
+        videoPlayer.src = "bear_anime.mp4";
+        videoPlayer.style.display = 'block';
+        videoPlayer.currentTime = 0; // 最初から再生
+        videoPlayer.play();
+    } else if (targetState === "BUNNY") {
+        videoPlayer.src = "bunny_anime.mp4";
+        videoPlayer.style.display = 'block';
+        videoPlayer.currentTime = 0; // 最初から再生
+        videoPlayer.play();
+    }
+}
+
+// ==========================================
+// 簡易FFT (Cooley-Tukey Radix-2)
+// ==========================================
+function computeFFT(real) {
+    let n = real.length;
+    let imag = new Float32Array(n);
+    let j = 0;
+    for (let i = 0; i < n - 1; i++) {
+        if (i < j) { let tr = real[j]; real[j] = real[i]; real[i] = tr; }
+        let k = n >> 1;
+        while (k <= j) { j -= k; k >>= 1; }
+        j += k;
+    }
+    for (let size = 2; size <= n; size *= 2) {
+        let halfSize = size / 2;
+        let tablestep = n / size;
+        for (let i = 0; i < n; i += size) {
+            for (let k = i, m = 0; k < i + halfSize; k++, m += tablestep) {
+                let angle = -2 * Math.PI * m / n;
+                let c = Math.cos(angle); let s = Math.sin(angle);
+                let t_real = real[k + halfSize] * c - imag[k + halfSize] * s;
+                let t_imag = real[k + halfSize] * s + imag[k + halfSize] * c;
+                real[k + halfSize] = real[k] - t_real; imag[k + halfSize] = imag[k] - t_imag;
+                real[k] += t_real; imag[k] += t_imag;
+            }
+        }
+    }
+    let magnitudes = new Float32Array(n / 2);
+    for(let i = 0; i < n / 2; i++) {
+        magnitudes[i] = Math.sqrt(real[i]*real[i] + imag[i]*imag[i]);
+    }
+    return magnitudes;
+}
+</script>
+</body>
+</html>
