@@ -6,13 +6,12 @@
     <style>
         /* 完全に白背景の中央配置スタイル */
         body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
             background-color: #ffffff; 
-            color: #333333; 
             margin: 0; 
+            padding: 0;
             height: 100vh;
+            width: 100vw;
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
             overflow: hidden;
@@ -21,9 +20,8 @@
         /* 接続用UIのコンテナ */
         #setup-ui {
             position: absolute;
-            top: 40px;
-            text-align: center;
             z-index: 10;
+            text-align: center;
         }
 
         button { 
@@ -34,15 +32,17 @@
             color: white; 
             border: none; 
             border-radius: 8px; 
-            transition: background-color 0.2s;
             font-weight: bold;
+            transition: background-color 0.2s;
         }
         button:hover { background-color: #555; }
         #status { margin-top: 10px; color: #888; font-size: 14px;}
         
-        /* キャンバスは枠線を消して背景に溶け込ませる */
-        canvas { 
-            background-color: transparent; 
+        /* 全画面表示用の画像スタイル */
+        #displayImage {
+            width: 100%;
+            height: 100%;
+            object-fit: contain; /* 縦横比を崩さずに画面いっぱいに表示 */
         }
     </style>
 </head>
@@ -54,8 +54,8 @@
         <div id="status">Waiting for connection...</div>
     </div>
     
-    <!-- メインの描画エリア -->
-    <canvas id="displayCanvas" width="800" height="800"></canvas>
+    <!-- 全画面画像表示エリア -->
+    <img id="displayImage" src="whissen_wait.png" alt="Dispenser Status">
 
 <script>
 // ==========================================
@@ -70,7 +70,7 @@ const BIN_RES = SAMPLE_RATE / SAMPLES;
 const BIN_15K = Math.round(15000 / BIN_RES); 
 const BIN_20K = Math.round(20000 / BIN_RES); 
 
-const THRESHOLD = 15000; // ★ 感度調整用
+const THRESHOLD = 8000; // ★ 感度調整用
 const HOLD_TIME_MS = 2000; // 表示を維持する時間 (ミリ秒)
 
 let port;
@@ -79,21 +79,24 @@ let isConnected = false;
 
 // State Variables
 let displayState = "WAITING"; 
+let currentDisplayedState = ""; // 現在表示中の状態を記録（無駄な書き換えを防ぐため）
 let lastDetectTime = 0;
 
-// Canvas Setup
-const canvas = document.getElementById('displayCanvas');
-const ctx = canvas.getContext('2d');
-const width = canvas.width;
-const height = canvas.height;
+// 画像エレメント
+const imgElement = document.getElementById('displayImage');
 
-// 画像プリロード
-let imgEmpty = new Image(); imgEmpty.src = 'image_2.png';
-let imgSoap = new Image(); imgSoap.src = 'image_1.png';
-let imgAlcohol = new Image(); imgAlcohol.src = 'image_0.png';
+// 画像のパス
+const IMG_WAIT = 'whissen_wait.png';
+const IMG_SOAP = 'whissen_soap.png';
+const IMG_ALCOHOL = 'whissen_alcohol.png';
 
-// 起動時から描画ループだけは開始しておく
-requestAnimationFrame(drawLoop);
+// 切り替え時のちらつきを防ぐために画像をプリロード
+(new Image()).src = IMG_WAIT;
+(new Image()).src = IMG_SOAP;
+(new Image()).src = IMG_ALCOHOL;
+
+// 起動時からUI更新ループを開始
+requestAnimationFrame(updateLoop);
 
 // ==========================================
 // Serial Communication
@@ -226,104 +229,27 @@ function computeFFT(real) {
 }
 
 // ==========================================
-// Rendering / UI Graphics
+// Rendering / UI Update
 // ==========================================
-function drawLoop() {
-    // 画面全体を白でクリア
-    ctx.clearRect(0, 0, width, height);
-    
+function updateLoop() {
     // 時間経過でWAITINGに戻す
     if (displayState !== "WAITING" && Date.now() - lastDetectTime > HOLD_TIME_MS) {
         displayState = "WAITING";
     }
 
-    drawDispenserIllustration(displayState);
-    
-    requestAnimationFrame(drawLoop);
-}
-
-// ディスペンサーを描画する関数
-function drawDispenserIllustration(state) {
-    const cx = width / 2;
-    const cy = height / 2 - 40;
-    
-    // 寸法設定
-    const bottleW = 200;
-    const bottleH = 260;
-    const bottleX = cx - bottleW / 2;
-    const bottleY = cy - bottleH / 2;
-    
-    const pumpW = 36;
-    const pumpH = 70;
-    const pumpX = cx - pumpW / 2;
-    const pumpY = bottleY - pumpH;
-    
-    // 状態による画像とテキストの定義
-    let liquidColor = "transparent";
-    let text = "";
-    let textColor = "#cccccc";
-    let img;
-
-    if (state === "SOAP") {
-        liquidColor = "#FF4081"; // 濃いピンク
-        text = "Soap";
-        textColor = "#E91E63";
-        img = imgSoap;
-    } else if (state === "ALCOHOL") {
-        liquidColor = "#00B0FF"; // 鮮やかな水色
-        text = "Alcohol";
-        textColor = "#0091EA";
-        img = imgAlcohol;
-    } else {
-        // WAITING
-        text = "Waiting...";
-        textColor = "#bbbbbb";
-        img = imgEmpty;
-    }
-
-    // 画像がロードされている場合のみ描画
-    if (img && img.complete && img.naturalWidth !== 0) {
-        const bottleFillY = bottleY + bottleH * 0.25; // 液体を描画する範囲の上端
-        const bottleFillH = bottleH * 0.75; // 液体を描画する範囲の高さ
-        const bottleFillX = bottleX;
-        const bottleFillW = bottleW;
-        
-        // 液体を描画（WAITING以外の時）
-        if (state !== "WAITING") {
-            ctx.fillStyle = liquidColor;
-            ctx.beginPath();
-            ctx.rect(bottleFillX, bottleFillY, bottleFillW, bottleFillH);
-            ctx.fill();
+    // 状態が変更された時のみ画像のsrcを書き換える
+    if (currentDisplayedState !== displayState) {
+        if (displayState === "SOAP") {
+            imgElement.src = IMG_SOAP;
+        } else if (displayState === "ALCOHOL") {
+            imgElement.src = IMG_ALCOHOL;
+        } else {
+            imgElement.src = IMG_WAIT;
         }
-
-        // 画像を描画
-        // 画像は白背景を含んでいるため、Canvas全体に白背景をクリアした後に描画
-        const imgRatio = img.naturalWidth / img.naturalHeight;
-        const imgH = bottleH + pumpH;
-        const imgW = imgH * imgRatio;
-        const imgX = cx - imgW / 2;
-        const imgY = bottleY - pumpH;
-        ctx.drawImage(img, imgX, imgY, imgW, imgH);
-    } else {
-        // 画像がロードされていない、またはロードエラーの場合
-        ctx.strokeStyle = "#333333";
-        ctx.lineWidth = 12;
-        ctx.beginPath();
-        ctx.roundRect(bottleX, bottleY, bottleW, bottleH, 30);
-        ctx.stroke();
+        currentDisplayedState = displayState;
     }
-
-    // テキストを描画
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = textColor;
     
-    if (state === "WAITING") {
-        ctx.font = 'bold 36px sans-serif';
-    } else {
-        ctx.font = 'bold 72px sans-serif';
-    }
-    ctx.fillText(text, cx, bottleY + bottleH + 40);
+    requestAnimationFrame(updateLoop);
 }
 
 document.getElementById('connectBtn').addEventListener('click', connect);
@@ -331,4 +257,3 @@ document.getElementById('connectBtn').addEventListener('click', connect);
 </script>
 </body>
 </html>
-```http://googleusercontent.com/image_generation_content/427
