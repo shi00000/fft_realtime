@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高周波検知 防犯アプリ</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            font-family: sans-serif;
+            background-color: #121212;
+            color: #fff;
+        }
+
+        /* 待機画面のスタイル */
+        #idle-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            text-align: center;
+        }
+        #idle-screen h1 {
+            color: #1DB954;
+            font-size: 28px;
+        }
+        .btn-start {
+            margin-top: 20px;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: bold;
+            color: #fff;
+            background-color: #1DB954;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .btn-start:active { background-color: #14833b; }
+        
+        #status-text {
+            margin-top: 20px;
+            color: #888;
+        }
+
+        /* 警告画面（HELP!）のスタイルとアニメーション */
+        @keyframes flashAlert {
+            0% { background-color: #ff0000; }
+            50% { background-color: #660000; }
+            100% { background-color: #ff0000; }
+        }
+        #alert-screen {
+            display: none; /* 初期状態は非表示 */
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            background-color: #ff0000;
+            animation: flashAlert 0.5s infinite; /* 赤く点滅 */
+            text-align: center;
+        }
+        #alert-screen h1 {
+            font-size: 80px;
+            margin: 0;
+            color: #fff;
+            text-shadow: 4px 4px 0 #000;
+        }
+        .btn-stop {
+            margin-top: 40px;
+            padding: 20px 40px;
+            font-size: 24px;
+            font-weight: bold;
+            color: #000;
+            background-color: #fff;
+            border: none;
+            border-radius: 40px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+        }
+        .btn-stop:active { background-color: #ccc; }
+        
+        /* 動作確認用の小さなビジュアライザ */
+        canvas {
+            width: 80%; max-width: 400px; height: 60px;
+            background-color: #000; margin-top: 30px;
+            border: 1px solid #333; border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 待機中の画面 -->
+    <div id="idle-screen">
+        <h1>🛡️ 高周波 防犯モニター</h1>
+        <p>15kHz以上の強い音を検知するとアラームが鳴ります</p>
+        <button id="startBtn" class="btn-start">監視をスタート</button>
+        <div id="status-text">マイクが無効です</div>
+        <canvas id="miniCanvas"></canvas>
+    </div>
+
+    <!-- 警告（HELP!）画面 -->
+    <div id="alert-screen">
+        <h1>HELP!</h1>
+        <p>高周波アラームを検知しました</p>
+        <button id="stopBtn" class="btn-stop">アラームを止める</button>
+    </div>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const idleScreen = document.getElementById('idle-screen');
+        const alertScreen = document.getElementById('alert-screen');
+        const statusText = document.getElementById('status-text');
+        
+        const canvas = document.getElementById('miniCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 400; canvas.height = 60;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let isMonitoring = false;
+        let isAlerting = false;
+        
+        // サイレン用の変数
+        let sirenOscillator = null;
+        let sirenGain = null;
+        let sirenInterval = null;
+
+        // ★ 感度の設定（0〜255）
+        // 数値が小さいほど過敏に反応し、大きいほど強い音が出ないと反応しません
+        const DETECTION_THRESHOLD = 180; 
+        const TARGET_FREQ = 15000; // 15kHz以上を検知
+
+        startBtn.addEventListener('click', async () => {
+            if (isMonitoring) return;
+
+            try {
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                
+                // 生の音を取得するためフィルターを無効化
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+                });
+                
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                source.connect(analyser);
+                
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                isMonitoring = true;
+                
+                statusText.textContent = "監視中... (15kHz以上を監視)";
+                startBtn.textContent = "監視中です";
+                startBtn.style.backgroundColor = "#555";
+                
+                monitorLoop();
+
+            } catch (err) {
+                alert('エラー: ' + err.message);
+            }
+        });
+
+        function monitorLoop() {
+            if (!isMonitoring) return;
+            requestAnimationFrame(monitorLoop);
+            
+            analyser.getByteFrequencyData(dataArray);
+            drawMiniVisualizer(); // 動作確認用の描画
+
+            if (isAlerting) return; // すでにアラーム鳴動中なら判定しない
+
+            // 周波数の解像度（1つの配列データが何Hz幅か）を計算
+            const hzPerBin = (audioContext.sampleRate / 2) / analyser.frequencyBinCount;
+            // 15kHzが配列の何番目(インデックス)になるかを計算
+            const startIndex = Math.floor(TARGET_FREQ / hzPerBin);
+
+            // 15kHz以上の帯域に閾値(THRESHOLD)を超えるピークがあるかチェック
+            for (let i = startIndex; i < dataArray.length; i++) {
+                if (dataArray[i] > DETECTION_THRESHOLD) {
+                    triggerAlert();
+                    break;
+                }
+            }
+        }
+
+        function triggerAlert() {
+            isAlerting = true;
+            
+            // 画面の切り替え
+            idleScreen.style.display = 'none';
+            alertScreen.style.display = 'flex';
+            
+            // サイレン音の再生開始
+            startSiren();
+        }
+
+        stopBtn.addEventListener('click', () => {
+            isAlerting = false;
+            
+            // 画面を元に戻す
+            alertScreen.style.display = 'none';
+            idleScreen.style.display = 'flex';
+            
+            // サイレン音の停止
+            stopSiren();
+        });
+
+        // --- サイレン音を生成して鳴らす処理 ---
+        function startSiren() {
+            sirenOscillator = audioContext.createOscillator();
+            sirenGain = audioContext.createGain();
+            
+            // サイレンの種類（矩形波でピーポー音を作る）
+            sirenOscillator.type = 'square';
+            
+            // 音量の設定 (0.0 〜 1.0) ★音が大きい場合はここを 0.5 などに下げる
+            sirenGain.gain.value = 1.0; 
+            
+            sirenOscillator.connect(sirenGain);
+            sirenGain.connect(audioContext.destination);
+            
+            sirenOscillator.start();
+            
+            let isHighPitch = false;
+            // 0.3秒間隔で高い音と低い音を交互に切り替える（ピーポーピーポー）
+            sirenInterval = setInterval(() => {
+                sirenOscillator.frequency.value = isHighPitch ? 3000 : 2000;
+                isHighPitch = !isHighPitch;
+            }, 300);
+        }
+
+        function stopSiren() {
+            if (sirenInterval) clearInterval(sirenInterval);
+            if (sirenOscillator) {
+                sirenOscillator.stop();
+                sirenOscillator.disconnect();
+                sirenGain.disconnect();
+            }
+        }
+
+        // --- 動作確認用のミニビジュアライザ描画 ---
+        function drawMiniVisualizer() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            const barWidth = canvas.width / dataArray.length;
+            let x = 0;
+            
+            // 15kHz以上の場所がわかりやすいように色を変える
+            const hzPerBin = (audioContext.sampleRate / 2) / analyser.frequencyBinCount;
+            const startIndex = Math.floor(TARGET_FREQ / hzPerBin);
+
+            for (let i = 0; i < dataArray.length; i++) {
+                const barHeight = (dataArray[i] / 255) * canvas.height;
+                
+                // 15kHz未満は暗い緑、15kHz以上は明るい赤で描画
+                ctx.fillStyle = (i >= startIndex) ? '#ff5555' : '#14833b';
+                
+                ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                x += barWidth;
+            }
+        }
+    </script>
+</body>
+</html>
