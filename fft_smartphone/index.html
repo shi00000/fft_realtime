@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>リアルタイムFFT (22kHz)</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            margin: 0;
+        }
+        canvas {
+            width: 100%;
+            max-width: 800px;
+            height: 300px;
+            background-color: #000000;
+            border: 1px solid #333;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #121212;
+            background-color: #1DB954;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+        }
+        button:active {
+            background-color: #14833b;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>リアルタイム周波数解析</h2>
+    <button id="startButton">マイクを有効にする</button>
+    <canvas id="fftCanvas"></canvas>
+
+    <script>
+        const startButton = document.getElementById('startButton');
+        const canvas = document.getElementById('fftCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Canvasの内部解像度を高めに設定（スマホのRetinaディスプレイ対策）
+        canvas.width = 1024;
+        canvas.height = 512;
+
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let animationId;
+
+        startButton.addEventListener('click', async () => {
+            // 既に実行中の場合は処理をスキップ
+            if (audioContext && audioContext.state === 'running') return;
+
+            try {
+                // AudioContextの初期化（ブラウザの仕様で、ユーザー操作後に生成する必要がある）
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // マイクへのアクセス要求
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const source = audioContext.createMediaStreamSource(stream);
+                
+                // AnalyserNodeの作成（ここでFFTを行います）
+                analyser = audioContext.createAnalyser();
+                
+                // fftSizeは2の累乗。2048の場合、周波数の解像度(bin)は1024分割になります。
+                analyser.fftSize = 2048;
+                
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                
+                // マイク入力をアナライザーに接続
+                source.connect(analyser);
+                
+                // ボタンのテキストを変更
+                startButton.textContent = "解析中... (" + (audioContext.sampleRate / 2 / 1000).toFixed(1) + "kHzまで)";
+                
+                // 描画ループの開始
+                draw();
+
+            } catch (err) {
+                alert('マイクへのアクセスが拒否されたか、エラーが発生しました。\n' + err);
+                console.error(err);
+            }
+        });
+
+        function draw() {
+            animationId = requestAnimationFrame(draw);
+
+            // 現在の周波数データを配列に取得 (0〜255の値)
+            analyser.getByteFrequencyData(dataArray);
+
+            // 背景のクリア
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 棒グラフの幅（全体の幅 / データ数）
+            const barWidth = (canvas.width / dataArray.length);
+            let x = 0;
+
+            for (let i = 0; i < dataArray.length; i++) {
+                // 音の強さ(0〜255)をCanvasの高さに合わせてスケール
+                const barHeight = (dataArray[i] / 255) * canvas.height;
+
+                // 色を周波数帯域（インデックス）によって変化させるグラデーション
+                const r = barHeight + (25 * (i / dataArray.length));
+                const g = 250 * (i / dataArray.length);
+                const b = 50;
+                
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                
+                // 棒グラフの描画 (x, y, width, height)
+                ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                x += barWidth;
+            }
+        }
+    </script>
+</body>
+</html>
